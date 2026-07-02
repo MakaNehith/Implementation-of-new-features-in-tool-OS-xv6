@@ -1,4 +1,4 @@
-# PA-1: Extending xv6 with Custom System Calls
+# Extending xv6 with Custom System Calls
 
 ## PART-A:
 

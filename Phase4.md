@@ -1,4 +1,4 @@
-# Programming Assignment 4: Disk Scheduling and RAID-backed Swap in xv6
+# Disk Scheduling and RAID-backed Swap in xv6
 
 In this assignment, xv6 is extended to support the disk-backed swap space instead of the in-memory swap space implemented in PA-3. The disk scheduling policies (FCFS and SSTF) are implemented. RAID levels(0,1 and 5) are implemented for the swap space by simulating the disks in software in single fs.img
 ## Implementations

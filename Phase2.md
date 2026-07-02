@@ -1,4 +1,4 @@
-# PA2: System-Call-Aware Multi-Level Feedback Queue Scheduler in xv6
+# System-Call-Aware Multi-Level Feedback Queue Scheduler in xv6
 
 ## Modifications made to proc.h
 #### Modifications made to struct proc
