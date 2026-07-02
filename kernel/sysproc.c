@@ -107,3 +107,16 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_getpid2(void)
+{
+  return myproc()->pid;
+}
+
+uint64
+sys_hello(void)
+{
+  printf("Hello from the kernel!\n");
+  return 0;
+}
