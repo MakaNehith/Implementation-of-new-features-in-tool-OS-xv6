@@ -10,7 +10,13 @@ struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
 
+struct mlfq mlfq[NMLFQ];
+
+struct spinlock mlfq_lock;
+
 struct proc *initproc;
+
+int time_quantum[NMLFQ];
 
 int nextpid = 1;
 struct spinlock pid_lock;
@@ -54,8 +60,129 @@ procinit(void)
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->state = UNUSED;
+      // initialisation of syscallcount to 0 for the process slots
+      p->syscallcount = 0;
+
+      // MLFQ
+      p->level = 0;
+      p->ticks_consumed = 0;
+      for(int i = 0; i<NMLFQ; i++){
+        p->total_ticks[i] = 0;
+      }
+      p->times_scheduled = 0;
+      p->prev_syscallcount = 0;
+      p->isboosted = 0;
+
+      // VM STATS
+      p->page_faults = 0;
+      p->pages_evicted = 0;
+      p->pages_swapped_in = 0;
+      p->pages_swapped_out = 0;
+      p->resident_pages = 0;
+
+      // DISK STATS
+      p->disk_reads = 0;
+      p->disk_writes = 0;
+      p->total_disk_latency = 0;
+
       p->kstack = KSTACK((int) (p - proc));
   }
+}
+
+void
+mlfqinit(void)
+{
+  struct mlfq* q;
+
+  initlock(&mlfq_lock, "mlfq_lock");
+  for(q = mlfq; q < &mlfq[NMLFQ]; q++){
+    q->head = 0;
+    q->tail = 0;
+    q->count_of_processes = 0;
+  }
+
+  for(int i = 0; i<NMLFQ; i++){
+    time_quantum[i] = (int)(2<<i);
+  }
+}
+
+int
+isEmpty(int level)
+{
+  if(mlfq[level].count_of_processes == 0){
+    return 1;
+  }
+  else{
+    return 0;
+  }
+}
+
+int
+isFull(int level)
+{
+  if(mlfq[level].count_of_processes == NPROC){
+    return 1;
+  }
+  else{
+    return 0;
+  } 
+}
+
+void
+enqueue(struct proc* p, int level)
+{
+  if(isFull(level)){
+    panic("MLF queue is full");
+  }
+  else{
+    mlfq[level].queue[mlfq[level].tail] = p;
+    mlfq[level].tail = (mlfq[level].tail + 1)%NPROC;
+    mlfq[level].count_of_processes++;
+  }
+
+}
+
+struct proc* 
+dequeue(int level)
+{
+  struct proc* p = 0;
+  if(isEmpty(level)){
+    panic("MLF queue is empty");
+  }
+  else{
+    p = mlfq[level].queue[mlfq[level].head];
+    mlfq[level].head = (mlfq[level].head + 1)%NPROC;
+    mlfq[level].count_of_processes--;
+  }
+
+  return p;
+}
+
+void
+mlfq_priority_boost(void)
+{
+  acquire(&mlfq_lock);
+  struct proc* p;
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state == RUNNING){
+      p->isboosted = 1;
+    }
+    release(&p->lock);
+  }
+  for(int level = 1; level < NMLFQ; level++){
+    while(!isEmpty(level)){
+      p = dequeue(level);
+      acquire(&p->lock);
+      p->total_ticks[p->level] += p->ticks_consumed;
+      p->ticks_consumed = 0;
+      p->level = 0;
+      p->prev_syscallcount = p->syscallcount;
+      release(&p->lock);
+      enqueue(p,0);
+    }
+  }
+  release(&mlfq_lock);
 }
 
 // Must be called with interrupts disabled,
@@ -125,8 +252,11 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+  release(&p->lock);
+
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+    acquire(&p->lock);
     freeproc(p);
     release(&p->lock);
     return 0;
@@ -135,6 +265,7 @@ found:
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
+    acquire(&p->lock);
     freeproc(p);
     release(&p->lock);
     return 0;
@@ -145,6 +276,8 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  acquire(&p->lock);
 
   return p;
 }
@@ -159,7 +292,7 @@ freeproc(struct proc *p)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
   if(p->pagetable)
-    proc_freepagetable(p->pagetable, p->sz);
+    proc_freepagetable(p->pagetable, p->sz, p->pid);
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -168,6 +301,30 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->syscallcount = 0;
+
+  // MLFQ
+  p->level = 0;
+  p->ticks_consumed = 0;
+  for(int i = 0; i<NMLFQ; i++){
+    p->total_ticks[i] = 0;
+  }
+  p->times_scheduled = 0;
+  p->prev_syscallcount = 0;
+  p->isboosted = 0;
+
+  // VM STATS
+  p->page_faults = 0;
+  p->pages_evicted = 0;
+  p->pages_swapped_in = 0;
+  p->pages_swapped_out = 0;
+  p->resident_pages = 0;
+
+  // DISK STATS
+  p->disk_reads = 0;
+  p->disk_writes = 0;
+  p->total_disk_latency = 0;
+
   p->state = UNUSED;
 }
 
@@ -189,7 +346,7 @@ proc_pagetable(struct proc *p)
   // to/from user space, so not PTE_U.
   if(mappages(pagetable, TRAMPOLINE, PGSIZE,
               (uint64)trampoline, PTE_R | PTE_X) < 0){
-    uvmfree(pagetable, 0);
+    uvmfree(pagetable, 0, p->pid);
     return 0;
   }
 
@@ -197,8 +354,8 @@ proc_pagetable(struct proc *p)
   // trampoline.S.
   if(mappages(pagetable, TRAPFRAME, PGSIZE,
               (uint64)(p->trapframe), PTE_R | PTE_W) < 0){
-    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-    uvmfree(pagetable, 0);
+    uvmunmap(pagetable, TRAMPOLINE, 1, 0, p->pid);
+    uvmfree(pagetable, 0, p->pid);
     return 0;
   }
 
@@ -208,11 +365,11 @@ proc_pagetable(struct proc *p)
 // Free a process's page table, and free the
 // physical memory it refers to.
 void
-proc_freepagetable(pagetable_t pagetable, uint64 sz)
+proc_freepagetable(pagetable_t pagetable, uint64 sz, int pid)
 {
-  uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-  uvmunmap(pagetable, TRAPFRAME, 1, 0);
-  uvmfree(pagetable, sz);
+  uvmunmap(pagetable, TRAMPOLINE, 1, 0, pid);
+  uvmunmap(pagetable, TRAPFRAME, 1, 0, pid);
+  uvmfree(pagetable, sz, pid);
 }
 
 // Set up first user process.
@@ -229,6 +386,10 @@ userinit(void)
   p->state = RUNNABLE;
 
   release(&p->lock);
+
+  acquire(&mlfq_lock);
+  enqueue(p,0);
+  release(&mlfq_lock);
 }
 
 // Grow or shrink user memory by n bytes.
@@ -268,12 +429,18 @@ kfork(void)
     return -1;
   }
 
+  release(&np->lock);
+
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz, np) < 0){
+    acquire(&np->lock);
     freeproc(np);
     release(&np->lock);
     return -1;
   }
+
+  acquire(&np->lock);
+  
   np->sz = p->sz;
 
   // copy saved user registers.
@@ -300,7 +467,21 @@ kfork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+  np->prev_syscallcount = np->syscallcount;
   release(&np->lock);
+
+  acquire(&mlfq_lock);
+  enqueue(np,0);
+  release(&mlfq_lock);
+
+  // acquire(&p->lock);
+  // if(p->level > 0){
+  //   release(&p->lock);
+  //   yield();
+  // }
+  // else{
+  //   release(&p->lock);
+  // }
 
   return pid;
 }
@@ -385,18 +566,37 @@ kwait(uint64 addr)
         acquire(&pp->lock);
 
         havekids = 1;
+        // if(pp->state == ZOMBIE){
+        //   // Found one.
+        //   pid = pp->pid;
+        //   if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
+        //                           sizeof(pp->xstate)) < 0) {
+        //     release(&pp->lock);
+        //     release(&wait_lock);
+        //     return -1;
+        //   }
+        //   freeproc(pp);
+        //   release(&pp->lock);
+        //   release(&wait_lock);
+        //   return pid;
+        // }
         if(pp->state == ZOMBIE){
           // Found one.
           pid = pp->pid;
-          if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
-                                  sizeof(pp->xstate)) < 0) {
-            release(&pp->lock);
-            release(&wait_lock);
+          int child_xstate = pp->xstate; // 1. Save the status to a local variable
+          
+          freeproc(pp);                  // 2. Clean up the child while holding the locks
+          
+          release(&pp->lock);            // 3. Drop the child lock
+          release(&wait_lock);           // 4. Drop the global wait lock
+          
+          // 5. Safely copy the data to user space!
+          // If this triggers a page fault and SSD swap I/O, it is completely fine 
+          // because we are no longer holding any spinlocks.
+          if(addr != 0 && copyout(p->pagetable, addr, (char *)&child_xstate, sizeof(child_xstate)) < 0) {
             return -1;
           }
-          freeproc(pp);
-          release(&pp->lock);
-          release(&wait_lock);
+          
           return pid;
         }
         release(&pp->lock);
@@ -438,24 +638,27 @@ scheduler(void)
     intr_off();
 
     int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
+    acquire(&mlfq_lock);
+    for(int level = 0; level < NMLFQ; level++){
+      if(!isEmpty(level)){
         found = 1;
+        p = dequeue(level);
+        acquire(&p->lock);
+        p->state = RUNNING;
+        p->times_scheduled++;
+        c->proc = p;
+        break;
       }
+    }
+    release(&mlfq_lock);
+
+    if(found == 1){
+      swtch(&c->context, &p->context);
+
+      c->proc = 0;
       release(&p->lock);
     }
-    if(found == 0) {
+    else{
       // nothing to run; stop running on this core until an interrupt.
       asm volatile("wfi");
     }
@@ -494,8 +697,40 @@ void
 yield(void)
 {
   struct proc *p = myproc();
+  acquire(&mlfq_lock);
   acquire(&p->lock);
+
   p->state = RUNNABLE;
+
+  p->total_ticks[p->level] += p->ticks_consumed;
+
+  // printf("PID %d: level=%d ticks=%d syscalls=%d\n",
+  //        p->pid,
+  //        p->level,
+  //        p->ticks_consumed,
+  //        p->syscallcount - p->prev_syscallcount);
+  
+  if(!(p->isboosted)){
+    if((p->syscallcount - p->prev_syscallcount) >= (p->ticks_consumed)){
+      // No demotion
+    }
+    else{
+      p->level++;
+      if(p->level == NMLFQ){
+        p->level--;
+      }
+    }
+  }
+  else{
+    p->level = 0;
+    p->isboosted = 0;
+  }
+  p->ticks_consumed = 0;
+  p->prev_syscallcount = p->syscallcount;
+
+  enqueue(p,p->level);
+  release(&mlfq_lock);
+
   sched();
   release(&p->lock);
 }
@@ -575,15 +810,20 @@ wakeup(void *chan)
 {
   struct proc *p;
 
+  acquire(&mlfq_lock);
+
   for(p = proc; p < &proc[NPROC]; p++) {
     if(p != myproc()){
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
+        enqueue(p,p->level);
       }
       release(&p->lock);
     }
   }
+
+  release(&mlfq_lock);
 }
 
 // Kill the process with the given pid.
@@ -594,6 +834,7 @@ kkill(int pid)
 {
   struct proc *p;
 
+  acquire(&mlfq_lock);
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
     if(p->pid == pid){
@@ -601,12 +842,16 @@ kkill(int pid)
       if(p->state == SLEEPING){
         // Wake process from sleep().
         p->state = RUNNABLE;
+        enqueue(p,p->level);
+        
       }
       release(&p->lock);
+      release(&mlfq_lock);
       return 0;
     }
     release(&p->lock);
   }
+  release(&mlfq_lock);
   return -1;
 }
 
@@ -687,4 +932,142 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// B1
+int
+kgetppid()
+{
+  int pid;
+  struct proc *p = myproc();
+
+  if(p->pid == 1){
+    return -1;
+  }
+
+  acquire(&wait_lock);
+
+  struct proc *pp = p->parent;  
+  pid = pp->pid;
+
+  release(&wait_lock);
+
+  return pid;
+}
+
+// B2
+int
+kgetnumchild(void)
+{
+  struct proc *p = myproc();
+  int count_of_children = 0;
+
+  struct proc *pp;
+
+  acquire(&wait_lock);
+
+  for(pp = proc; pp < &proc[NPROC]; pp++){
+    if(pp->parent == p){
+      acquire(&pp->lock);
+      if(pp->state == RUNNABLE || pp->state == RUNNING || pp->state == SLEEPING){
+        count_of_children++;
+      }
+      release(&pp->lock);
+    }
+  }
+
+  release(&wait_lock);
+
+  return count_of_children;
+}
+
+// C3
+int
+kgetchildsyscount(int pid)
+{
+  struct proc *p = myproc();
+  struct proc *pp;
+  int childsyscallcount;
+
+  acquire(&wait_lock);
+
+  for(pp = proc; pp < &proc[NPROC]; pp++){
+    if(pp->parent == p && pp->pid == pid){
+      acquire(&pp->lock);
+      childsyscallcount = pp->syscallcount;
+      release(&pp->lock);
+      release(&wait_lock);
+      goto found;
+    }
+  }
+
+  release(&wait_lock);
+  return -1;
+
+found:
+  return childsyscallcount;
+}
+
+int
+kgetmlfqinfo(int pid, struct mlfqinfo* info)
+{
+  int found = -1;
+  struct proc* p;
+
+  for(p = proc; p<&proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->pid == pid){
+      found = 0;
+
+      info->level = p->level;
+      info->times_scheduled = p->times_scheduled;
+      info->total_syscalls = p->syscallcount;
+      for(int i = 0; i<NMLFQ; i++){
+        info->ticks[i] = p->total_ticks[i];
+      }
+      info->ticks[p->level] += p->ticks_consumed;
+      release(&p->lock);
+      break;
+    }
+    else{
+      release(&p->lock);
+    }
+  }
+
+  return found;
+}
+
+int
+kgetvmstats(int pid, struct vmstats* stats)
+{
+  int found = -1;
+  struct proc* p;
+
+  for(p = proc; p<&proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->pid == pid){
+      found = 0;
+      stats->page_faults = p->page_faults;
+      stats->pages_evicted = p->pages_evicted;
+      stats->pages_swapped_in = p->pages_swapped_in;
+      stats->pages_swapped_out = p->pages_swapped_out;
+      stats->resident_pages = p->resident_pages;
+      stats->disk_reads = p->disk_reads;
+      stats->disk_writes = p->disk_writes;
+      int disk_req = (p->disk_reads + p->disk_writes);
+      if(disk_req == 0){
+        stats->avg_disk_latency = 0;
+      }
+      else{
+        stats->avg_disk_latency = p->total_disk_latency/disk_req;
+      }
+      release(&p->lock);
+      break;
+    }
+    else{
+      release(&p->lock);
+    }
+  }
+
+  return found;
 }

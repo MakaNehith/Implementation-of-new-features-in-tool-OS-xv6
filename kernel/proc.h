@@ -92,6 +92,29 @@ struct proc {
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
 
+  // C1
+  int syscallcount;            // Number of syscalls invoked since creation
+
+  // MLFQ
+  int level;
+  int ticks_consumed;
+  int total_ticks[NMLFQ];
+  int times_scheduled;
+  int prev_syscallcount;
+  int isboosted;
+
+  // VM STATS
+  int page_faults;
+  int pages_evicted;
+  int pages_swapped_in;
+  int pages_swapped_out;
+  int resident_pages;
+
+  // DISK STATS
+  int disk_reads;
+  int disk_writes;
+  uint64 total_disk_latency;
+
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process
 
@@ -104,4 +127,31 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+};
+
+struct mlfq {
+  struct proc* queue[NPROC];
+  int head;
+  int tail;
+  int count_of_processes;
+};
+
+extern int time_quantum[NMLFQ];
+
+struct mlfqinfo {
+  int level;
+  int ticks[NMLFQ];
+  int times_scheduled;
+  int total_syscalls;
+};
+
+struct vmstats {
+  int page_faults;
+  int pages_evicted;
+  int pages_swapped_in;
+  int pages_swapped_out;
+  int resident_pages;
+  int disk_reads;
+  int disk_writes;
+  uint64 avg_disk_latency;
 };

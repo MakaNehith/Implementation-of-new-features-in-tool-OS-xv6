@@ -108,15 +108,141 @@ sys_uptime(void)
   return xticks;
 }
 
+// A2
 uint64
 sys_getpid2(void)
 {
   return myproc()->pid;
 }
 
+// A1
 uint64
 sys_hello(void)
 {
   printf("Hello from the kernel!\n");
+  return 0;
+}
+
+// B1
+uint64
+sys_getppid(void)
+{
+  return kgetppid();
+}
+
+// B2
+uint64
+sys_getnumchild(void)
+{
+  return kgetnumchild();
+}
+
+// C2
+uint64
+sys_getsyscount(void)
+{
+  return myproc()->syscallcount;
+}
+
+// C3
+uint64
+sys_getchildsyscount(void)
+{
+  int chpid;
+
+  argint(0,&chpid);
+
+  return kgetchildsyscount(chpid);
+}
+
+uint64
+sys_getlevel(void)
+{
+  int lvl;
+  struct proc* p = myproc();
+  acquire(&p->lock);
+  lvl = p->level;
+  release(&p->lock);
+
+  return lvl;
+}
+
+uint64
+sys_getmlfqinfo(void)
+{
+  int pid;
+  uint64 uaddr;
+  argint(0,&pid);
+  argaddr(1,&uaddr);
+
+  struct mlfqinfo kinfo;
+
+  int ret = kgetmlfqinfo(pid, &kinfo);
+  if(ret < 0)
+    return -1;
+
+  if(copyout(myproc()->pagetable, uaddr, (char*)&kinfo, sizeof(kinfo)) < 0)
+    return -1;
+
+  return 0;
+}
+
+uint64
+sys_getvmstats(void)
+{
+  int pid;
+  uint64 uaddr;
+  argint(0,&pid);
+  argaddr(1,&uaddr);
+
+  struct vmstats kvmstats;
+
+  int ret = kgetvmstats(pid,&kvmstats);
+  if(ret < 0)
+    return -1;
+
+  if(copyout(myproc()->pagetable, uaddr, (char*)&kvmstats, sizeof(kvmstats)) < 0)
+    return -1;
+
+  return 0;
+}
+
+uint64
+sys_setdisksched(void)
+{
+  int policy;
+  argint(0,&policy);
+
+  if(policy != 0 && policy != 1){
+    return -1;
+  }
+
+  disk_policy = policy;
+  return 0;
+}
+
+uint64
+sys_setraidlevel(void)
+{
+  int level;
+  argint(0,&level);
+
+  if(level != 0 && level != 1 && level != 5){
+    return -1;
+  }
+
+  raid_level = level;
+  return 0;
+}
+
+uint64
+sys_setfaileddisk(void)
+{
+  int disk;
+  argint(0,&disk);
+  if(disk < -1 || disk >= NSSD){
+    return -1;
+  }
+  failed_disk = disk;
   return 0;
 }

@@ -68,9 +68,13 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
+  } else if((r_scause() == 15 || r_scause() == 13)) {
     // page fault on lazily-allocated page
+    if(vmfault(p->pagetable,r_stval(),(r_scause() == 13 ? 1 : 0)) == 0){
+      printf("usertrap(): page fault allocation failed 0x%lx pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+      setkilled(p);
+    }
   } else {
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
@@ -81,8 +85,17 @@ usertrap(void)
     kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+  if(which_dev == 2){
+    acquire(&p->lock);
+    p->ticks_consumed++;
+    if(p->isboosted == 1 || p->ticks_consumed == time_quantum[p->level]){
+      release(&p->lock);
+      yield();
+    }
+    else{
+      release(&p->lock);
+    }
+  }
 
   prepare_return();
 
@@ -152,8 +165,18 @@ kerneltrap()
   }
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0)
-    yield();
+  if(which_dev == 2 && myproc() != 0){
+    struct proc* p = myproc();
+    acquire(&p->lock);
+    p->ticks_consumed++;
+    if(p->isboosted == 1 || p->ticks_consumed == time_quantum[p->level]){
+      release(&p->lock);
+      yield();
+    }
+    else{
+      release(&p->lock);
+    }
+  }
 
   // the yield() may have caused some traps to occur,
   // so restore trap registers for use by kernelvec.S's sepc instruction.
@@ -164,11 +187,21 @@ kerneltrap()
 void
 clockintr()
 {
+  int priority_boost = 0;
   if(cpuid() == 0){
     acquire(&tickslock);
     ticks++;
+
+    if(ticks%PRIORITYBOOST == 0){
+      priority_boost = 1;
+    }
+    
     wakeup(&ticks);
     release(&tickslock);
+  }
+
+  if(priority_boost){
+    mlfq_priority_boost();
   }
 
   // ask for the next timer interrupt. this also clears

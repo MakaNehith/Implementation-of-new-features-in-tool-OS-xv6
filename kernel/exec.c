@@ -40,6 +40,7 @@ kexec(char *path, char **argv)
   // Open the executable file.
   if((ip = namei(path)) == 0){
     end_op();
+    printf("Hello\n");
     return -1;
   }
   ilock(ip);
@@ -133,13 +134,13 @@ kexec(char *path, char **argv)
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = ulib.c:start()
   p->trapframe->sp = sp; // initial stack pointer
-  proc_freepagetable(oldpagetable, oldsz);
+  proc_freepagetable(oldpagetable, oldsz, p->pid);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
   if(pagetable)
-    proc_freepagetable(pagetable, sz);
+    proc_freepagetable(pagetable, sz, p->pid);
   if(ip){
     iunlockput(ip);
     end_op();

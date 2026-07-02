@@ -6,7 +6,12 @@
 #include "defs.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sleeplock.h"
+#include "vm.h"
 #include "fs.h"
+#include "buf.h"
+
+extern struct sleeplock raid_locks[SSDSIZE];
 
 /*
  * the kernel's page table.
@@ -16,6 +21,8 @@ pagetable_t kernel_pagetable;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
+
+int failed_disk = -1;
 
 // Make a direct-map page table for the kernel.
 pagetable_t
@@ -190,7 +197,7 @@ uvmcreate()
 // page-aligned. It's OK if the mappings don't exist.
 // Optionally free the physical memory.
 void
-uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
+uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free, int pid)
 {
   uint64 a;
   pte_t *pte;
@@ -201,11 +208,18 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0) // leaf page table entry allocated?
       continue;   
-    if((*pte & PTE_V) == 0)  // has physical page been allocated?
+    if((*pte & PTE_V) == 0 && (*pte & PTE_S) == 0){
       continue;
+    }  // has physical page been allocated?
+
     if(do_free){
-      uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+      if(*pte & PTE_S){
+        swapfree(pid,a);
+      }
+      else{
+        uint64 pa = PTE2PA(*pte);
+        kfree((void*)pa);
+      }
     }
     *pte = 0;
   }
@@ -218,6 +232,7 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 {
   char *mem;
   uint64 a;
+  struct proc *p = myproc();
 
   if(newsz < oldsz)
     return oldsz;
@@ -235,6 +250,14 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
+
+    acquire(&page_lock);
+    int mempage_index = PA2FTIDX(mem);
+    frame_table.frames[mempage_index].proc = p;
+    frame_table.frames[mempage_index].va = a;
+    p->resident_pages++;
+    release(&page_lock);
+
   }
   return newsz;
 }
@@ -251,7 +274,7 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 
   if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
     int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
-    uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+    uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1, myproc()->pid);
   }
 
   return newsz;
@@ -280,10 +303,10 @@ freewalk(pagetable_t pagetable)
 // Free user memory pages,
 // then free page-table pages.
 void
-uvmfree(pagetable_t pagetable, uint64 sz)
+uvmfree(pagetable_t pagetable, uint64 sz, int pid)
 {
   if(sz > 0)
-    uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
+    uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1, pid);
   freewalk(pagetable);
 }
 
@@ -294,7 +317,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
 int
-uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+uvmcopy(pagetable_t old, pagetable_t new, uint64 sz, struct proc* pp)
 {
   pte_t *pte;
   uint64 pa, i;
@@ -304,22 +327,40 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       continue;   // page table entry hasn't been allocated
-    if((*pte & PTE_V) == 0)
-      continue;   // physical page hasn't been allocated
-    pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
+    if((*pte & PTE_V) == 0 && (*pte & PTE_S) == 0){
+      continue;
+    }
+
     if((mem = kalloc()) == 0)
       goto err;
-    memmove(mem, (char*)pa, PGSIZE);
+    
+    flags = PTE_FLAGS(*pte);
+    if(*pte & PTE_S){
+      swap_copy(myproc()->pid,i,mem);
+      flags &= (~PTE_S);
+    }
+    else{
+      pa = PTE2PA(*pte);
+      memmove(mem, (char*)pa, PGSIZE);
+    }
+
     if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
       kfree(mem);
       goto err;
     }
+
+    acquire(&page_lock);
+    int mempage_index = PA2FTIDX(mem);
+    frame_table.frames[mempage_index].proc = pp;
+    frame_table.frames[mempage_index].va = i;
+    pp->resident_pages++;
+    release(&page_lock);
+
   }
   return 0;
 
  err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
+  uvmunmap(new, 0, i / PGSIZE, 1, pp->pid);
   return -1;
 }
 
@@ -455,20 +496,47 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   uint64 mem;
   struct proc *p = myproc();
 
+  p->page_faults++;
+
   if (va >= p->sz)
     return 0;
   va = PGROUNDDOWN(va);
-  if(ismapped(pagetable, va)) {
+  
+
+  pte_t *pte = walk(pagetable, va, 0);
+
+  if(pte && (*pte & PTE_V)){
     return 0;
   }
+  
   mem = (uint64) kalloc();
   if(mem == 0)
     return 0;
-  memset((void *) mem, 0, PGSIZE);
-  if (mappages(p->pagetable, va, PGSIZE, mem, PTE_W|PTE_U|PTE_R) != 0) {
+
+  int flags = PTE_W|PTE_U|PTE_R;
+  if(pte!=0 && (*pte & PTE_S)){
+    swap_in(p->pid,va,(char*)mem);
+    p->pages_swapped_in++;
+    flags = PTE_FLAGS(*pte) & (~PTE_S);
+  }
+  else{
+    memset((void *) mem, 0, PGSIZE);
+  }
+  if (mappages(p->pagetable, va, PGSIZE, mem, flags) != 0) {
     kfree((void *)mem);
     return 0;
   }
+
+  sfence_vma();
+
+  acquire(&page_lock);
+  int mempage_index = PA2FTIDX(mem);
+  frame_table.frames[mempage_index].proc = p;
+  frame_table.frames[mempage_index].va = va;
+  p->resident_pages++;
+  release(&page_lock);
+
+
   return mem;
 }
 
@@ -484,3 +552,157 @@ ismapped(pagetable_t pagetable, uint64 va)
   }
   return 0;
 }
+
+void
+raid_read(char *mem, int swap_idx, int local_raid_level)
+{
+  int base = (swap_idx*2);
+
+  if(local_raid_level == 0){
+    for(int i = 0; i<4; i++){
+      int disk = i%NSSD;
+      int vblock = base + (i/NSSD);
+      uint64 pblock = get_pblock(disk,vblock);
+
+      struct buf *bf = bread(0,pblock);
+
+      memmove((mem + (BSIZE*i)),((char*)(bf->data)),BSIZE);
+      brelse(bf);
+    }
+  }
+
+  else if(local_raid_level == 1){
+    for(int i = 0; i<4; i++){
+      int disk = (i%(NSSD/2))*2;
+      if(failed_disk >= 0 && failed_disk == disk){
+        disk = disk + 1;
+      }
+      int vblock = base + (i/(NSSD/2));
+
+      uint64 pblock = get_pblock(disk,vblock);
+      struct buf *bf = bread(0,pblock);
+
+      memmove((mem + (BSIZE*i)),((char*)(bf->data)),BSIZE);
+      brelse(bf);
+    }
+  }
+
+  else if(local_raid_level == 5){
+    for(int i = 0; i<4; i++){
+      int vblock = base + (i/(NSSD-1));
+      int parity_disk = vblock%NSSD;
+      int disk = (i%(NSSD-1));
+      if(disk >= parity_disk) disk++;
+
+      acquiresleep(&raid_locks[vblock]);
+
+      if(failed_disk >= 0 && failed_disk == disk){
+        uint64 pblock, parity_pblock;
+        struct buf *bf, *parity_bf;
+
+        parity_pblock = get_pblock(parity_disk,vblock);
+        parity_bf = bread(0,parity_pblock);
+
+        char *curr_mem = (mem + (BSIZE*i));
+
+        for(int k = 0; k<BSIZE; k++){
+          curr_mem[k] = parity_bf->data[k];
+        }
+
+        brelse(parity_bf);
+
+        for(int j = 0; j<NSSD; j++){
+          if(j!=failed_disk && j!=parity_disk){
+            pblock = get_pblock(j,vblock);
+            bf = bread(0,pblock);
+
+            for(int k = 0; k<BSIZE; k++){
+              curr_mem[k] = ((uint64)curr_mem[k]) ^ ((uint64)bf->data[k]);
+            }
+
+            brelse(bf);
+          }
+        }
+
+      }
+      
+      else{
+        uint64 pblock = get_pblock(disk,vblock);
+        struct buf *bf = bread(0,pblock);
+        
+        memmove((mem + (BSIZE*i)),((char*)(bf->data)),BSIZE);
+        brelse(bf);
+      }
+      
+      releasesleep(&raid_locks[vblock]);
+    }
+  }
+}
+
+
+void
+swap_in(int pid, uint64 va, char* mem)
+{
+  struct swap_page *p;
+  int found = 0;
+  acquire(&page_lock);
+  for(p = swap_space.pages; p <= &(swap_space.pages[SWAP_PAGES-1]); p++){
+    if(p->is_used && pid == p->pid && p->va == va){
+      found = 1;
+      // memmove((char*)mem,p->data,PGSIZE);
+      release(&page_lock);
+      raid_read(mem,(int)(p-swap_space.pages),p->saved_raid_level);
+      acquire(&page_lock);
+      p->is_used = 0;
+      p->pid = 0;
+      p->va = 0;
+      p->next_free_index = swap_space.freelist_head;
+      swap_space.freelist_head = (int)(p-swap_space.pages);
+      // memset(p->data,2,PGSIZE);
+      release(&page_lock);
+      return;
+      // break;
+    }
+  }
+  release(&page_lock);
+
+  if(!found){
+    panic("swap_in: page not found");
+  }
+}
+
+void
+swap_copy(int pid, uint64 va, char* mem)
+{
+  struct swap_page *p;
+  acquire(&page_lock);
+  for(p = swap_space.pages; p <= &(swap_space.pages[SWAP_PAGES-1]); p++){
+    if(p->is_used && pid == p->pid && p->va == va){
+      // memmove(mem,p->data,PGSIZE);
+      release(&page_lock);
+      raid_read(mem,(int)(p-swap_space.pages),p->saved_raid_level);
+      return;
+      // break;
+    }
+  }
+  release(&page_lock);
+}
+
+void
+swapfree(int pid, uint64 va){
+  struct swap_page *p;
+  acquire(&page_lock);
+  for(p = swap_space.pages; p <= &(swap_space.pages[SWAP_PAGES-1]); p++){
+    if(p->is_used && pid == p->pid && p->va == va){
+      // memset(p->data,2,PGSIZE);
+      p->is_used = 0;
+      p->pid = 0;
+      p->va = 0;
+      p->next_free_index = swap_space.freelist_head;
+      swap_space.freelist_head = (int)(p-swap_space.pages);
+      break;
+    }
+  }
+  release(&page_lock);
+}
+

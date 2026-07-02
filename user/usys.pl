@@ -42,5 +42,16 @@ entry("getpid");
 entry("sbrk");
 entry("pause");
 entry("uptime");
+# Entries are added for the custom syscalls
 entry("getpid2");
 entry("hello");
+entry("getppid");
+entry("getnumchild");
+entry("getsyscount");
+entry("getchildsyscount");
+entry("getlevel");
+entry("getmlfqinfo");
+entry("getvmstats");
+entry("setdisksched");
+entry("setraidlevel");
+entry("setfaileddisk");

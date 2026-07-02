@@ -49,6 +49,8 @@
 // must be a power of two.
 #define NUM 8
 
+#define SCHED_NUM 64
+
 // a single descriptor, from the spec.
 struct virtq_desc {
   uint64 addr;
@@ -78,6 +80,17 @@ struct virtq_used {
   uint16 flags; // always zero
   uint16 idx;   // device increments when it adds a ring[] entry
   struct virtq_used_elem ring[NUM];
+};
+
+struct virtq_sched {
+  uint64 block;
+  uint64 sector;
+  int write;
+  struct buf *b;
+  int level;
+  struct proc *p;
+  int valid;
+  struct virtq_sched *next;
 };
 
 // these are specific to virtio block devices, e.g. disks,

@@ -2,6 +2,24 @@
 
 struct stat;
 
+struct mlfqinfo {
+    int level;
+    int ticks[4];
+    int times_scheduled;
+    int total_syscalls;
+};
+
+struct vmstats {
+    int page_faults;
+    int pages_evicted;
+    int pages_swapped_in;
+    int pages_swapped_out;
+    int resident_pages;
+    int disk_reads;
+    int disk_writes;
+    uint64 avg_disk_latency;
+};
+
 // system calls
 int fork(void);
 int exit(int) __attribute__((noreturn));
@@ -24,8 +42,19 @@ int getpid(void);
 char* sys_sbrk(int,int);
 int pause(int);
 int uptime(void);
+// Added the prototypes for the custom system calls
 int getpid2(void);
 int hello(void);
+int getppid(void);
+int getnumchild(void);
+int getsyscount(void);
+int getchildsyscount(int);
+int getlevel(void);
+int getmlfqinfo(int, struct mlfqinfo*);
+int getvmstats(int, struct vmstats*);
+int setdisksched(int);
+int setraidlevel(int);
+int setfaileddisk(int);
 
 // ulib.c
 int stat(const char*, struct stat*);

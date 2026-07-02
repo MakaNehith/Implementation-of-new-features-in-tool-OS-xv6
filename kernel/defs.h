@@ -8,6 +8,12 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct mlfqinfo;
+struct vmstats;
+
+extern int disk_policy;
+extern int raid_level;
+extern int failed_disk;
 
 // bio.c
 void            binit(void);
@@ -59,6 +65,7 @@ void            ireclaim(int);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+uint64          get_pblock(int, int);
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -84,7 +91,7 @@ int             kfork(void);
 int             growproc(int);
 void            proc_mapstacks(pagetable_t);
 pagetable_t     proc_pagetable(struct proc *);
-void            proc_freepagetable(pagetable_t, uint64);
+void            proc_freepagetable(pagetable_t, uint64, int);
 int             kkill(int);
 int             killed(struct proc*);
 void            setkilled(struct proc*);
@@ -101,6 +108,17 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+int             kgetppid(void);
+int             kgetnumchild(void);
+int             kgetchildsyscount(int);
+void            mlfqinit(void);
+int             isEmpty(int);
+int             isFull(int);
+void            enqueue(struct proc*, int);
+struct proc*    dequeue(int);
+void            mlfq_priority_boost(void);
+int             kgetmlfqinfo(int, struct mlfqinfo*);
+int             kgetvmstats(int, struct vmstats*);
 
 // swtch.S
 void            swtch(struct context*, struct context*);
@@ -158,9 +176,9 @@ int             mappages(pagetable_t, uint64, uint64, uint64, int);
 pagetable_t     uvmcreate(void);
 uint64          uvmalloc(pagetable_t, uint64, uint64, int);
 uint64          uvmdealloc(pagetable_t, uint64, uint64);
-int             uvmcopy(pagetable_t, pagetable_t, uint64);
-void            uvmfree(pagetable_t, uint64);
-void            uvmunmap(pagetable_t, uint64, uint64, int);
+int             uvmcopy(pagetable_t, pagetable_t, uint64, struct proc*);
+void            uvmfree(pagetable_t, uint64, int);
+void            uvmunmap(pagetable_t, uint64, uint64, int, int);
 void            uvmclear(pagetable_t, uint64);
 pte_t *         walk(pagetable_t, uint64, int);
 uint64          walkaddr(pagetable_t, uint64);
@@ -169,6 +187,10 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             ismapped(pagetable_t, uint64);
 uint64          vmfault(pagetable_t, uint64, int);
+void            swap_in(int, uint64, char*);
+void            swap_copy(int, uint64, char*);
+void            swapfree(int, uint64);
+
 
 // plic.c
 void            plicinit(void);
